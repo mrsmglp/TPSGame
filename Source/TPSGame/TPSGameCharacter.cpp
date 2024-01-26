@@ -2,13 +2,17 @@
 
 #include "TPSGameCharacter.h"
 #include "Camera/CameraComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/InputComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/Controller.h"
 #include "GameFramework/SpringArmComponent.h"
+#include "HealthComponent.h"
+#include "WeaponComponent.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
+#include "Kismet/GameplayStatics.h"
 #include "Net/UnrealNetwork.h"
 
 
@@ -17,9 +21,6 @@
 
 ATPSGameCharacter::ATPSGameCharacter()
 {
-	SetReplicates(true);
-	SetReplicateMovement(true);
-	
 	// Set size for collision capsule
 	GetCapsuleComponent()->InitCapsuleSize(42.f, 96.0f);
 		
@@ -43,13 +44,20 @@ ATPSGameCharacter::ATPSGameCharacter()
 
 	/*************************************************************************************************/
 
+	SetReplicates(true);
+	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
+	WeaponComponent = CreateDefaultSubobject<UWeaponComponent>(TEXT("WeaponComponent"));
+
+	WeaponMeshComponent = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("WeaponMeshComponent"));
+	WeaponMeshComponent->SetupAttachment(GetMesh(), "weapon_r");
+	WeaponMeshComponent->SetVisibility(true);
+	WeaponMeshComponent->SetCollisionProfileName(TEXT("NoCollision"));
+	
 	SprintSpeedMultiplier = 2.0f;
 	bSprintEnabled = false;
 	bADSEnabled = false;
 	bFireEnabled = false;
 	bSwitchWeaponEnabled = false;
-	MaxHealth = 100.0f;
-	Health=MaxHealth;
 	
 	/*************************************************************************************************/
 	
@@ -73,6 +81,14 @@ void ATPSGameCharacter::BeginPlay()
 	// Call the base class  
 	Super::BeginPlay();
 
+	/*************************************************************************************************/
+	
+	SetReplicateMovement(true);
+	HealthComponent->SetIsReplicated(true);
+	WeaponComponent->SetIsReplicated(true);
+
+	/*************************************************************************************************/
+	
 	//Add Input Mapping Context
 	if (APlayerController* PlayerController = Cast<APlayerController>(Controller))
 	{
@@ -92,8 +108,6 @@ void ATPSGameCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Ou
 	DOREPLIFETIME(ATPSGameCharacter,bFireEnabled);
 	DOREPLIFETIME(ATPSGameCharacter,bSwitchWeaponEnabled);
 	DOREPLIFETIME(ATPSGameCharacter,bReloadEnabled);
-	DOREPLIFETIME(ATPSGameCharacter,MaxHealth);
-	DOREPLIFETIME(ATPSGameCharacter,Health);
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -115,20 +129,26 @@ void ATPSGameCharacter::SetupPlayerInputComponent(class UInputComponent* PlayerI
 		EnhancedInputComponent->BindAction(LookAction, ETriggerEvent::Triggered, this, &ATPSGameCharacter::Look);
 
 		//Crouch
-		EnhancedInputComponent->BindAction(CrouchAction, ETriggerEvent::Triggered, this, &ATPSGameCharacter::CrouchBegin);
+		EnhancedInputComponent->BindAction(CrouchAction, ETriggerEvent::Started, this, &ATPSGameCharacter::CrouchBegin);
 		EnhancedInputComponent->BindAction(CrouchAction, ETriggerEvent::Completed, this, &ATPSGameCharacter::CrouchEnd);
 
 		//Sprint
-		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Triggered, this, &ATPSGameCharacter::StartSprint);
+		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Started, this, &ATPSGameCharacter::StartSprint);
 		EnhancedInputComponent->BindAction(SprintAction, ETriggerEvent::Completed, this, &ATPSGameCharacter::StopSprint);
 
 		//ADS
-		EnhancedInputComponent->BindAction(ADSAction, ETriggerEvent::Triggered, this, &ATPSGameCharacter::StartADS);
+		EnhancedInputComponent->BindAction(ADSAction, ETriggerEvent::Started, this, &ATPSGameCharacter::StartADS);
 		EnhancedInputComponent->BindAction(ADSAction, ETriggerEvent::Completed, this, &ATPSGameCharacter::StopADS);
 
 		//Fire
-		EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Triggered, this, &ATPSGameCharacter::StartFire);
+		EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Started, this, &ATPSGameCharacter::StartFire);
 		EnhancedInputComponent->BindAction(FireAction, ETriggerEvent::Completed, this, &ATPSGameCharacter::StopFire);
+
+		//Switch Weapon
+		EnhancedInputComponent->BindAction(SwitchWeaponAction, ETriggerEvent::Started, this, &ATPSGameCharacter::SwitchWeapon);
+
+		//Reload Weapon
+		EnhancedInputComponent->BindAction(ReloadWeaponAction, ETriggerEvent::Started, this, &ATPSGameCharacter::ReloadWeapon);
 	}
 
 }
@@ -182,7 +202,7 @@ void ATPSGameCharacter::StartSprint_Implementation()
 {
 	if (GetCharacterMovement()->MaxWalkSpeed <800)
 	{
-		if (bIsCrouched !=true && bFireEnabled !=true && bADSEnabled !=true)
+		if (bIsCrouched == false && bFireEnabled == false && bADSEnabled == false)
 		{
 			GetCharacterMovement()->MaxWalkSpeed *= SprintSpeedMultiplier;
 			bSprintEnabled = true;
@@ -192,7 +212,6 @@ void ATPSGameCharacter::StartSprint_Implementation()
 
 void ATPSGameCharacter::StartADS_Implementation()
 {
-	//GEngine->AddOnScreenDebugMessage(-1, 25.0f, FColor::Yellow, TEXT("ADS_Implementation Has Been Called"));
 	if(bSprintEnabled == true)
 	{
 		StopSprint();
@@ -211,14 +230,15 @@ void ATPSGameCharacter::StopADS_Implementation()
 
 void ATPSGameCharacter::StartFire_Implementation()
 {
-	if(bSprintEnabled == true)
+	if(bFireEnabled == false && bSwitchWeaponEnabled == false && bReloadEnabled == false && WeaponComponent->bIsInitializedWeapons == true)
 	{
-		StopSprint();
-		bFireEnabled = true;
-	}
-	else
-	{
-		bFireEnabled = true;
+		bool bCanReload, bCanFire;
+		WeaponComponent->WeaponCheckAmmo(bReloadEnabled, bSwitchWeaponEnabled, bCanReload, bCanFire);
+		if(bCanFire == true)
+		{
+			bFireEnabled = true;
+			WeaponFire();
+		}
 	}
 }
 
@@ -226,6 +246,123 @@ void ATPSGameCharacter::StopFire_Implementation()
 {
 	bFireEnabled = false;
 }
+
+void ATPSGameCharacter::WeaponFire_Implementation()
+{
+	if(bFireEnabled)
+	{
+		WeaponFireMulticast();
+		FVector Start = FollowCamera->GetComponentLocation() + CameraBoom->TargetArmLength * FollowCamera->GetForwardVector() + 50 * FollowCamera->GetForwardVector();
+		FVector End = FollowCamera->GetForwardVector() * 10000 + FollowCamera->GetComponentLocation();
+		FHitResult HitResult;
+		GetWorld()->LineTraceSingleByChannel(HitResult, Start, End, ECC_GameTraceChannel1);
+		if (HitResult.bBlockingHit)
+		{
+			DrawDebugLine(GetWorld(), Start, HitResult.Location, FColor::Yellow, true, 5, 0, 1);
+			DrawDebugPoint(GetWorld(), HitResult.Location, 5, FColor::Red, false, 5);
+			UGameplayStatics::ApplyDamage(HitResult.GetActor(), WeaponComponent->WeaponDamage[WeaponComponent->CurrentActiveWeaponIndex], nullptr, this, UDamageType::StaticClass());
+			FireMontageSoundEffect(Start,HitResult.Location);
+		}
+		else
+		{
+			DrawDebugLine(GetWorld(), Start, HitResult.TraceEnd, FColor::Yellow, true, 5, 0, 1);
+			FireMontageSoundEffect(Start,HitResult.TraceEnd);
+		}
+	}
+	GetWorldTimerManager().SetTimer(TimerHandle, [this]()
+		{
+		bool bCanReload, bCanFire;
+		WeaponComponent->WeaponCheckAmmo(bReloadEnabled, bSwitchWeaponEnabled, bCanReload, bCanFire);
+		if(bCanFire == true && WeaponComponent->bWeaponAutoFire[WeaponComponent->CurrentActiveWeaponIndex] == true)
+		{
+			WeaponFire();
+		}
+		}, WeaponComponent->WeaponFireTime[WeaponComponent->CurrentActiveWeaponIndex], false);
+}
+
+void ATPSGameCharacter::WeaponFireMulticast_Implementation()
+{
+	int32 NewClip;
+	WeaponComponent->WeaponTakeBulletFromClip(NewClip);
+}
+
+void ATPSGameCharacter::FireMontageSoundEffect_Implementation(FVector SoundLocation, FVector EffectLocation)
+{
+	const USkeletalMeshComponent* CharacterMesh = GetMesh();
+	UAnimInstance* AnimInstance = CharacterMesh->GetAnimInstance();
+	AnimInstance->Montage_Play(WeaponComponent->WeaponFireMontage[WeaponComponent->CurrentActiveWeaponIndex],1,EMontagePlayReturnType::MontageLength,0,false);
+	if (WeaponComponent->WeaponFireSound[WeaponComponent->CurrentActiveWeaponIndex])
+	{
+		UGameplayStatics::PlaySoundAtLocation(this, WeaponComponent->WeaponFireSound[WeaponComponent->CurrentActiveWeaponIndex], SoundLocation);
+	}
+	if (WeaponComponent->WeaponFireEffect[WeaponComponent->CurrentActiveWeaponIndex])
+	{
+		UGameplayStatics::SpawnEmitterAtLocation(GetWorld(), WeaponComponent->WeaponFireEffect[WeaponComponent->CurrentActiveWeaponIndex], EffectLocation);
+	}
+}
+
+
+void ATPSGameCharacter::SwitchWeapon_Implementation()
+{
+	if(bFireEnabled == false && bSwitchWeaponEnabled == false && bReloadEnabled == false && WeaponComponent->bIsInitializedWeapons == true)
+	{
+		bSwitchWeaponEnabled = true;
+		SwitchWeaponMulticast();
+		SwitchWeaponMeshMontage(WeaponComponent->WeaponMesh[WeaponComponent->CurrentActiveWeaponIndex]);
+	}
+}
+
+void ATPSGameCharacter::SwitchWeaponMulticast_Implementation()
+{
+	WeaponComponent->SwitchWeapon();
+}
+
+void ATPSGameCharacter::SwitchWeaponMeshMontage_Implementation(USkeletalMesh* NewWeaponMeshComponent)
+{
+	const USkeletalMeshComponent* CharacterMesh = GetMesh();
+	UAnimInstance* AnimInstance = CharacterMesh->GetAnimInstance();
+	AnimInstance->Montage_Play(WeaponComponent->WeaponEquipMontage[WeaponComponent->CurrentActiveWeaponIndex],1,EMontagePlayReturnType::MontageLength,0,false);
+	GetWorldTimerManager().SetTimer(TimerHandle, [this, NewWeaponMeshComponent]()
+	{
+		// Вызываем функцию установки меша оружия через 0.5 секунд
+		WeaponMeshComponent->SetSkeletalMesh(NewWeaponMeshComponent);
+		bSwitchWeaponEnabled = false;
+	}, 0.5f, false);
+}
+
+void ATPSGameCharacter::ReloadWeapon_Implementation()
+{
+	if(bFireEnabled == false && bSwitchWeaponEnabled == false && bReloadEnabled == false && WeaponComponent->bIsInitializedWeapons == true)
+	{
+		bool bCanReload, bCanFire;
+		WeaponComponent->WeaponCheckAmmo(bReloadEnabled, bSwitchWeaponEnabled, bCanReload, bCanFire);
+		if (bCanReload == true)
+		{
+			bReloadEnabled = true;
+			ReloadWeaponMontage();
+			GetWorldTimerManager().SetTimer(TimerHandle, [this]()
+				{
+				// Вызываем функцию WeaponReloadAmmo через 1 секунду
+				ReloadWeaponMulticast();
+				bReloadEnabled = false;
+				}, 2.0f, false);
+		}
+	}
+}
+
+void ATPSGameCharacter::ReloadWeaponMontage_Implementation()
+{
+	const USkeletalMeshComponent* CharacterMesh = GetMesh();
+	UAnimInstance* AnimInstance = CharacterMesh->GetAnimInstance();
+	AnimInstance->Montage_Play(WeaponComponent->WeaponReloadMontage[WeaponComponent->CurrentActiveWeaponIndex],1,EMontagePlayReturnType::MontageLength,0,false);
+}
+
+void ATPSGameCharacter::ReloadWeaponMulticast_Implementation()
+{
+	int32 CurrentAmmoClipMax, CurrentAmmoStock;
+	WeaponComponent->WeaponReloadAmmo(CurrentAmmoClipMax, CurrentAmmoStock);
+}
+
 
 void ATPSGameCharacter::CrouchBegin()
 {

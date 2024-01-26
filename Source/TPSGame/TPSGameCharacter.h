@@ -4,6 +4,8 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
+#include "HealthComponent.h"
+#include "WeaponComponent.h"
 #include "InputActionValue.h"
 #include "TPSGameCharacter.generated.h"
 
@@ -37,7 +39,7 @@ class ATPSGameCharacter : public ACharacter
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
 	class UInputAction* LookAction;
 	
-	/********************************InputActions For TZ**********************************************/
+	/****************************New InputActions For Character*****************************************/
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = Input, meta = (AllowPrivateAccess = "true"))
 	class UInputAction* CrouchAction;
@@ -62,7 +64,22 @@ class ATPSGameCharacter : public ACharacter
 public:
 	ATPSGameCharacter();
 
-	/*******************************Variables For TZ*************************************************/
+	/********************************New Components for Character*************************************/
+	
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	UHealthComponent* HealthComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	UWeaponComponent* WeaponComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	USkeletalMeshComponent* WeaponMeshComponent;
+
+	FTimerHandle TimerHandle;
+	
+	/*************************************************************************************************/
+	
+	/***************************New Variables For Character*******************************************/
 
 	UPROPERTY(Replicated,EditAnywhere,BlueprintReadWrite,Category="Sprint")
 	float SprintSpeedMultiplier;
@@ -81,12 +98,6 @@ public:
 
 	UPROPERTY(Replicated,BlueprintReadWrite,Category="Fire")
 	bool bReloadEnabled;
-
-	UPROPERTY(Replicated,EditAnywhere,BlueprintReadWrite,Category="Health")
-	float Health;
-
-	UPROPERTY(Replicated,EditAnywhere,BlueprintReadWrite,Category="Health")
-	float MaxHealth;
 	
 	/*************************************************************************************************/
 	
@@ -98,7 +109,7 @@ protected:
 	/** Called for looking input */
 	void Look(const FInputActionValue& Value);
 	
-	/************************************Functions For TZ*********************************************/
+	/*******************************New Functions For Character***************************************/
 	
 	UFUNCTION(Server,Reliable)
 	void StartSprint();
@@ -118,13 +129,35 @@ protected:
 	UFUNCTION(Server,Reliable)
 	void StopFire();
 
-	/*
-	 * Dla functions Crouch/Uncrouch ne nujno ukazivat Server or Multicast...
-	 * Inache budet fignya polnaya. Poetomu Ia ne sozdaval eche 1 perem dlya Crouch
-	 * Budem v Blueprints brat -> bool IsCrouched
-	 */
+	UFUNCTION(NetMulticast,Reliable)
+	void FireMontageSoundEffect(FVector SoundLocation, FVector EffectLocation);
+
+	UFUNCTION(Server,Reliable)
+	void WeaponFire();
+
+	UFUNCTION(NetMulticast,Reliable)
+	void WeaponFireMulticast();
+	
+	UFUNCTION(Server,Reliable)
+	void SwitchWeapon();
+
+	UFUNCTION(NetMulticast,Reliable)
+	void SwitchWeaponMulticast();
+
+	UFUNCTION(Server,Reliable)
+	void ReloadWeapon();
+
+	UFUNCTION(NetMulticast,Reliable)
+	void ReloadWeaponMulticast();
+
+	UFUNCTION(NetMulticast,Reliable)
+	void ReloadWeaponMontage();
+
+	UFUNCTION(NetMulticast,Reliable)
+	void SwitchWeaponMeshMontage(USkeletalMesh* NewWeaponMeshComponent);
 	
 	void CrouchBegin();
+	
 	void CrouchEnd();
 	
 	/*************************************************************************************************/
@@ -141,7 +174,7 @@ public:
 	FORCEINLINE class USpringArmComponent* GetCameraBoom() const { return CameraBoom; }
 	/** Returns FollowCamera subobject **/
 	FORCEINLINE class UCameraComponent* GetFollowCamera() const { return FollowCamera; }
-
+	/** Replication Function **/
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 };
 
